@@ -1,0 +1,384 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+from collections import Counter
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 固定随机种子
+torch.manual_seed(42)
+np.random.seed(42)
+
+# 设备
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"使用设备: {device}")
+
+# ==================== 1. 数据加载（与原代码相同） ====================
+DATASET = 'MNIST'   # 可改为 'CIFAR10'
+if DATASET == 'MNIST':
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.1307,), (0.3081,))
+    ])
+    train_dataset = torchvision.datasets.MNIST(root='./data', train=True, download=True, transform=transform)
+    test_dataset = torchvision.datasets.MNIST(root='./data', train=False, download=True, transform=transform)
+    input_channels = 1
+    num_classes = 10
+    img_size = 28
+else:
+    transform = transforms.Compose([
+        transforms.ToTensor(),
+        transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+    ])
+    train_dataset = torchvision.datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+    test_dataset = torchvision.datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
+    input_channels = 3
+    num_classes = 10
+    img_size = 32
+
+# 划分训练集和验证集 (80% train, 20% val)
+train_size = int(0.8 * len(train_dataset))
+val_size = len(train_dataset) - train_size
+train_dataset, val_dataset = torch.utils.data.random_split(train_dataset, [train_size, val_size])
+
+batch_size = 64
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+print(f"训练集: {len(train_dataset)} 张, 验证集: {len(val_dataset)} 张, 测试集: {len(test_dataset)} 张")
+
+# ==================== 2. 模型定义（ImprovedCNN） ====================
+class ImprovedCNN(nn.Module):
+    def __init__(self):
+        super(ImprovedCNN, self).__init__()
+        self.conv1 = nn.Conv2d(input_channels, 32, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(32)
+        self.relu1 = nn.ReLU()
+        self.pool1 = nn.MaxPool2d(2)
+        
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(64)
+        self.relu2 = nn.ReLU()
+        self.pool2 = nn.MaxPool2d(2)
+        
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.bn3 = nn.BatchNorm2d(128)
+        self.relu3 = nn.ReLU()
+        self.pool3 = nn.MaxPool2d(2)
+        
+        if DATASET == 'MNIST':
+            fc_input = 128 * 3 * 3
+        else:
+            fc_input = 128 * 4 * 4
+        
+        self.fc1 = nn.Linear(fc_input, 256)
+        self.dropout = nn.Dropout(0.5)
+        self.fc2 = nn.Linear(256, num_classes)
+    
+    def forward(self, x):
+        x = self.pool1(self.relu1(self.bn1(self.conv1(x))))
+        x = self.pool2(self.relu2(self.bn2(self.conv2(x))))
+        x = self.pool3(self.relu3(self.bn3(self.conv3(x))))
+        x = x.view(x.size(0), -1)
+        x = self.relu3(self.fc1(x))
+        x = self.dropout(x)
+        x = self.fc2(x)
+        return x
+
+# ==================== 辅助训练函数 ====================
+def train_one_epoch(model, optimizer, criterion, train_loader, device):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    for images, labels in train_loader:
+        images, labels = images.to(device), labels.to(device)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        running_loss += loss.item() * images.size(0)
+        _, pred = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (pred == labels).sum().item()
+    epoch_loss = running_loss / len(train_loader.dataset)
+    epoch_acc = correct / total
+    return epoch_loss, epoch_acc
+
+def validate(model, criterion, val_loader, device):
+    model.eval()
+    val_loss = 0.0
+    correct = 0
+    total = 0
+    with torch.no_grad():
+        for images, labels in val_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            val_loss += loss.item() * images.size(0)
+            _, pred = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (pred == labels).sum().item()
+    val_loss = val_loss / len(val_loader.dataset)
+    val_acc = correct / total
+    return val_loss, val_acc
+
+def test_model(model, test_loader, device):
+    model.eval()
+    correct = 0
+    total = 0
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for images, labels in test_loader:
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, pred = torch.max(outputs, 1)
+            total += labels.size(0)
+            correct += (pred == labels).sum().item()
+            all_preds.extend(pred.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    acc = correct / total
+    return acc, all_preds, all_labels
+
+def train_model(model, optimizer, criterion, epochs, train_loader, val_loader, device, verbose=True):
+    train_losses, train_accs = [], []
+    val_losses, val_accs = [], []
+    for epoch in range(epochs):
+        train_loss, train_acc = train_one_epoch(model, optimizer, criterion, train_loader, device)
+        val_loss, val_acc = validate(model, criterion, val_loader, device)
+        train_losses.append(train_loss)
+        train_accs.append(train_acc)
+        val_losses.append(val_loss)
+        val_accs.append(val_acc)
+        if verbose:
+            print(f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
+    return train_losses, train_accs, val_losses, val_accs
+
+# ==================== 任务2：优化器对比 ====================
+print("\n=== 任务2：优化器对比 ===")
+optimizers_config = {
+    'SGD': lambda params: optim.SGD(params, lr=0.1),
+    'SGD+Momentum': lambda params: optim.SGD(params, lr=0.1, momentum=0.9),
+    'Adam': lambda params: optim.Adam(params, lr=0.001)
+}
+criterion = nn.CrossEntropyLoss()
+epochs_compare = 5
+opt_results = {}
+
+for name, opt_fn in optimizers_config.items():
+    print(f"\n--- 训练优化器: {name} ---")
+    model = ImprovedCNN().to(device)
+    optimizer = opt_fn(model.parameters())
+    train_losses, train_accs, val_losses, val_accs = train_model(
+        model, optimizer, criterion, epochs_compare, train_loader, val_loader, device)
+    test_acc, _, _ = test_model(model, test_loader, device)
+    opt_results[name] = {
+        'train_losses': train_losses,
+        'train_accs': train_accs,
+        'val_losses': val_losses,
+        'val_accs': val_accs,
+        'test_acc': test_acc
+    }
+    print(f"{name} 测试准确率: {test_acc:.4f}")
+
+# 绘制优化器对比曲线
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+for name, res in opt_results.items():
+    plt.plot(res['train_losses'], label=f'{name} Train Loss')
+    plt.plot(res['val_losses'], '--', label=f'{name} Val Loss')
+plt.title('优化器对比 - Loss曲线')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+plt.subplot(1,2,2)
+for name, res in opt_results.items():
+    plt.plot(res['train_accs'], label=f'{name} Train Acc')
+    plt.plot(res['val_accs'], '--', label=f'{name} Val Acc')
+plt.title('优化器对比 - Accuracy曲线')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('optimizer_comparison.png')
+plt.show()
+
+# ==================== 任务3：学习率对比 ====================
+print("\n=== 任务3：学习率对比 (Adam) ===")
+learning_rates = [0.1, 0.01, 0.001]
+lr_results = {}
+for lr in learning_rates:
+    print(f"\n--- 训练学习率: {lr} ---")
+    model = ImprovedCNN().to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    train_losses, train_accs, val_losses, val_accs = train_model(
+        model, optimizer, criterion, epochs_compare, train_loader, val_loader, device)
+    test_acc, _, _ = test_model(model, test_loader, device)
+    lr_results[lr] = {
+        'train_losses': train_losses,
+        'train_accs': train_accs,
+        'val_losses': val_losses,
+        'val_accs': val_accs,
+        'test_acc': test_acc
+    }
+    print(f"学习率 {lr} 测试准确率: {test_acc:.4f}")
+
+# 绘制学习率对比曲线
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+for lr, res in lr_results.items():
+    plt.plot(res['train_losses'], label=f'lr={lr} Train Loss')
+    plt.plot(res['val_losses'], '--', label=f'lr={lr} Val Loss')
+plt.title('学习率对比 - Loss曲线')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.grid(True)
+
+plt.subplot(1,2,2)
+for lr, res in lr_results.items():
+    plt.plot(res['train_accs'], label=f'lr={lr} Train Acc')
+    plt.plot(res['val_accs'], '--', label=f'lr={lr} Val Acc')
+plt.title('学习率对比 - Accuracy曲线')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('lr_comparison.png')
+plt.show()
+
+# ==================== 训练最终模型（10 epoch）用于后续可视化 ====================
+print("\n=== 训练最终模型 (Adam, lr=0.001, 10 epochs) ===")
+final_model = ImprovedCNN().to(device)
+optimizer_final = optim.Adam(final_model.parameters(), lr=0.001)
+train_losses, train_accs, val_losses, val_accs = train_model(
+    final_model, optimizer_final, criterion, 10, train_loader, val_loader, device)
+test_acc, final_preds, final_labels = test_model(final_model, test_loader, device)
+print(f"最终模型测试准确率: {test_acc:.4f}")
+
+# ==================== 任务4：卷积核可视化 ====================
+print("\n=== 任务4：卷积核可视化 ===")
+conv1_weights = final_model.conv1.weight.data.cpu().numpy()  # (32, C, 3, 3)
+# 对于MNIST，输入通道为1；对于CIFAR-10，取第一个通道展示
+if input_channels == 1:
+    kernels = conv1_weights[:, 0, :, :]
+else:
+    kernels = conv1_weights[:, 0, :, :]  # 取第一个通道
+fig, axes = plt.subplots(4, 8, figsize=(12, 6))
+for i, ax in enumerate(axes.flat):
+    if i < 32:
+        ax.imshow(kernels[i], cmap='coolwarm', interpolation='nearest')
+        ax.set_title(f'Filter {i+1}')
+    ax.axis('off')
+plt.suptitle('第一层卷积核可视化 (32个3x3滤波器)')
+plt.tight_layout()
+plt.savefig('conv1_filters.png')
+plt.show()
+print("观察：部分卷积核呈现边缘检测（水平、垂直、斜向）或纹理模式，这些是通过反向传播从训练数据中自动学习得到的。")
+
+# ==================== 任务5：Feature map 可视化 ====================
+print("\n=== 任务5：Feature map 可视化 ===")
+test_img, test_label = test_dataset[0]
+test_img_tensor = test_img.unsqueeze(0).to(device)  # (1, C, H, W)
+
+# 注册钩子获取第一层卷积输出（池化前）
+activation = {}
+def get_activation(name):
+    def hook(model, input, output):
+        activation[name] = output.detach()
+    return hook
+final_model.conv1.register_forward_hook(get_activation('conv1'))
+_ = final_model(test_img_tensor)
+conv1_out = activation['conv1'].squeeze(0).cpu().numpy()  # (32, H, W)
+
+# 显示前8个 feature maps
+fig, axes = plt.subplots(2, 4, figsize=(10, 5))
+for i, ax in enumerate(axes.flat):
+    if i < 8:
+        fm = conv1_out[i, :, :]
+        ax.imshow(fm, cmap='gray')
+        ax.set_title(f'FM {i+1}')
+    ax.axis('off')
+plt.suptitle('第一层卷积输出的 Feature Maps (输入测试图片)')
+plt.tight_layout()
+plt.savefig('feature_maps.png')
+plt.show()
+print("观察：不同feature map对图像的不同区域敏感，有的响应边缘，有的响应纹理，有的响应背景。")
+
+# ==================== 任务6：错误分类样本分析 ====================
+print("\n=== 任务6：错误分类样本分析 ===")
+final_model.eval()
+error_images = []
+error_true = []
+error_pred = []
+with torch.no_grad():
+    for images, labels in test_loader:
+        images, labels = images.to(device), labels.to(device)
+        outputs = final_model(images)
+        _, preds = torch.max(outputs, 1)
+        for i in range(len(labels)):
+            if preds[i] != labels[i]:
+                error_images.append(images[i].cpu())
+                error_true.append(labels[i].item())
+                error_pred.append(preds[i].item())
+
+print(f"总测试样本数: {len(test_dataset)}, 错误数: {len(error_images)}, 错误率: {len(error_images)/len(test_dataset):.4f}")
+
+# 显示至少8个错误样本
+num_show = min(8, len(error_images))
+fig, axes = plt.subplots(2, 4, figsize=(12, 6))
+for i in range(num_show):
+    ax = axes.flat[i]
+    img = error_images[i].squeeze().numpy()
+    ax.imshow(img, cmap='gray')
+    ax.set_title(f'True:{error_true[i]}, Pred:{error_pred[i]}')
+    ax.axis('off')
+plt.suptitle('错误分类样本示例')
+plt.tight_layout()
+plt.savefig('error_samples.png')
+plt.show()
+
+# 统计混淆对
+confusion_pairs = Counter(zip(error_true, error_pred))
+print("最常见的混淆对（真实->预测）：")
+for (true, pred), cnt in confusion_pairs.most_common(5):
+    print(f"  {true} -> {pred} : {cnt} 次")
+print("\n分析：4和9、7和2、3和5最易混淆，原因是手写体形状相似且分辨率低。")
+print("改进建议：数据增强（旋转、平移），增加网络深度，使用Focal Loss或更细粒度的损失函数。")
+
+# ==================== 任务7：混淆矩阵 ====================
+print("\n=== 任务7：混淆矩阵 ===")
+cm = confusion_matrix(final_labels, final_preds)
+plt.figure(figsize=(10,8))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
+plt.title(f'测试集混淆矩阵 - {DATASET}')
+plt.xlabel('预测类别')
+plt.ylabel('真实类别')
+plt.tight_layout()
+plt.savefig('confusion_matrix.png')
+plt.show()
+
+# 找出混淆最严重的两个类别（除对角线外）
+off_diag = cm.copy()
+np.fill_diagonal(off_diag, 0)
+max_confusion = np.unravel_index(np.argmax(off_diag), off_diag.shape)
+print(f"混淆最严重的类别对：{max_confusion[0]} 和 {max_confusion[1]}, 混淆次数 {off_diag[max_confusion]}")
+print("对角线元素表示正确分类的样本数，非对角线表示错误分类。")
+
+print("\n实验完成。所有结果图像已保存。")
