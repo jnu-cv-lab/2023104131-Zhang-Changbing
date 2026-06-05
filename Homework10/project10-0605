@@ -1,0 +1,149 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# 设置中文字体
+plt.rcParams['font.sans-serif'] = ['WenQuanYi Micro Hei', 'SimHei', 'DejaVu Sans']
+plt.rcParams['axes.unicode_minus'] = False
+
+# 1. Sinusoidal Position Encoding
+def sinusoidal_position_encoding(seq_len, d_model):
+    pe = np.zeros((seq_len, d_model))
+    position = np.arange(seq_len)[:, np.newaxis]
+    div_term = np.exp(np.arange(0, d_model, 2) * -(np.log(10000.0) / d_model))
+    pe[:, 0::2] = np.sin(position * div_term)
+    pe[:, 1::2] = np.cos(position * div_term)
+    return pe
+
+# 2. 二维向量旋转 
+def rotate_2d(vec, theta):
+    c, s = np.cos(theta), np.sin(theta)
+    rot_matrix = np.array([[c, -s], [s, c]])
+    return np.dot(vec, rot_matrix.T)
+
+#3. 高维 RoPE 实现
+def precompute_rope_freqs(d_model, seq_len, base=10000.0):
+    i = np.arange(0, d_model, 2)
+    freqs = 1.0 / (base ** (2 * i / d_model))
+    position = np.arange(seq_len)[:, np.newaxis]
+    angles = position * freqs
+    return angles
+
+def apply_rope(x, angles):
+    """
+    x: (seq_len, d_model) 或 (batch, seq_len, d_model)
+    angles: (seq_len, d_model//2)
+    """
+    original_ndim = x.ndim
+    if original_ndim == 2:
+        x = x[np.newaxis, :, :]  # (1, seq_len, d_model)
+    batch, seq_len, d_model = x.shape
+    d_half = d_model // 2
+    x_reshaped = x.reshape(batch, seq_len, d_half, 2)
+    cos_theta = np.cos(angles)
+    sin_theta = np.sin(angles)
+    x_rot = np.zeros_like(x_reshaped)
+    x_rot[..., 0] = x_reshaped[..., 0] * cos_theta - x_reshaped[..., 1] * sin_theta
+    x_rot[..., 1] = x_reshaped[..., 0] * sin_theta + x_reshaped[..., 1] * cos_theta
+    x_rot = x_rot.reshape(batch, seq_len, d_model)
+    if original_ndim == 2:
+        return x_rot[0]
+    return x_rot
+
+# 4. 数值实验：验证 RoPE 的相对位置性质
+def relative_position_validation(d_model=128, seq_len=20, pos_i=2, pos_j=5):
+    np.random.seed(42)
+    angles = precompute_rope_freqs(d_model, seq_len)
+    q = np.random.randn(d_model)
+    k = np.random.randn(d_model)
+    # 构造只在特定位置有值的序列
+    q_seq = np.zeros((seq_len, d_model))
+    k_seq = np.zeros((seq_len, d_model))
+    q_seq[pos_i] = q
+    k_seq[pos_j] = k
+    q_rot = apply_rope(q_seq, angles)
+    k_rot = apply_rope(k_seq, angles)
+    dot_ij = np.dot(q_rot[pos_i], k_rot[pos_j])
+    # 整体平移
+    shift = 3
+    new_i = pos_i + shift
+    new_j = pos_j + shift
+    if new_i >= seq_len or new_j >= seq_len:
+        print("平移超出序列长度，请减小 shift")
+        return
+    q_seq_shift = np.zeros((seq_len, d_model))
+    k_seq_shift = np.zeros((seq_len, d_model))
+    q_seq_shift[new_i] = q
+    k_seq_shift[new_j] = k
+    q_rot_shift = apply_rope(q_seq_shift, angles)
+    k_rot_shift = apply_rope(k_seq_shift, angles)
+    dot_ij_shift = np.dot(q_rot_shift[new_i], k_rot_shift[new_j])
+    print(f"原始相对位置 {pos_j - pos_i} 的点积: {dot_ij:.6f}")
+    print(f"平移后相对位置相同 ({new_j - new_i}) 的点积: {dot_ij_shift:.6f}")
+    print(f"差异: {abs(dot_ij - dot_ij_shift):.10f}")
+    # 对比不同相对位置
+    other_j = pos_j + 1 if pos_j + 1 < seq_len else pos_j - 1
+    k_seq_other = np.zeros((seq_len, d_model))
+    k_seq_other[other_j] = k
+    k_rot_other = apply_rope(k_seq_other, angles)
+    dot_ij_other = np.dot(q_rot[pos_i], k_rot_other[other_j])
+    print(f"不同相对位置 ({other_j - pos_i}) 的点积: {dot_ij_other:.6f}")
+
+# 5. 对比 E+pos 和 RoPE 的输入方式
+def demo_input_methods():
+    d_model = 4
+    seq_len = 3
+    token_emb = np.random.randn(seq_len, d_model)
+    pe = sinusoidal_position_encoding(seq_len, d_model)
+    e_plus_pos = token_emb + pe
+    angles = precompute_rope_freqs(d_model, seq_len)
+    rope_emb = apply_rope(token_emb, angles)
+    print("\n=== E+pos vs RoPE 输入方式对比 ===")
+    print("E+pos: token_embedding + position_encoding (加法注入)")
+    print("RoPE: token_embedding 本身被旋转 (乘法注入)")
+    print(f"E+pos 结果形状: {e_plus_pos.shape}")
+    print(f"RoPE 结果形状: {rope_emb.shape}")
+
+#6. 可视化
+def visualize_pe():
+    d_model = 32
+    seq_len = 20
+    pe = sinusoidal_position_encoding(seq_len, d_model)
+    angles = precompute_rope_freqs(d_model, seq_len)
+    plt.figure(figsize=(12, 5))
+    plt.subplot(1, 2, 1)
+    plt.imshow(pe, aspect='auto', cmap='viridis')
+    plt.colorbar(label='value')
+    plt.title('Sinusoidal Position Encoding')
+    plt.xlabel('Dimension')
+    plt.ylabel('Position')
+    plt.subplot(1, 2, 2)
+    plt.imshow(angles, aspect='auto', cmap='viridis')
+    plt.colorbar(label='angle (rad)')
+    plt.title('RoPE rotation angles per position & dimension pair')
+    plt.xlabel('Pair index')
+    plt.ylabel('Position')
+    plt.tight_layout()
+    plt.show()
+
+# 主程序
+if __name__ == "__main__":
+    d_model = 8
+    seq_len = 5
+    pe = sinusoidal_position_encoding(seq_len, d_model)
+    print("Sinusoidal Position Encoding (first 3 positions):")
+    print(pe[:3])
+    
+    vec = np.array([1.0, 0.0])
+    rot_vec = rotate_2d(vec, np.pi/2)
+    print(f"\n二维向量 {vec} 旋转90°后: {rot_vec}")
+    
+    angles = precompute_rope_freqs(d_model, seq_len)
+    x = np.random.randn(seq_len, d_model)
+    rope_x = apply_rope(x, angles)
+    print(f"\nRoPE 应用后形状: {rope_x.shape}")
+    
+    print("\n=== 验证 RoPE 相对位置性质 ===")
+    relative_position_validation(d_model=128, seq_len=20, pos_i=2, pos_j=5)
+    
+    demo_input_methods()
+    visualize_pe()
